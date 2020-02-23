@@ -6,10 +6,12 @@ from scrapy.linkextractors import LinkExtractor
 from scrapy_splash import SplashRequest
 from scrapy.http import Request
 from w3lib.url import safe_url_string
+from twisted.internet.error import DNSLookupError
+
 from ppSpider import settings
 
 
-URL_RESOURCE_NAME = 'data/majestic-top-10k.csv'
+URL_RESOURCE_NAME = 'data/majestic-top-1k.csv'
 HTTP_PREFIX = 'http://'
 LUA_SOURCE = pkgutil.get_data('ppSpider', 'scripts/crawlera.lua').decode('utf-8')
 
@@ -48,9 +50,19 @@ class ppSpider(CrawlSpider):
 	name = 'pp_spider'
 	http_user = 'e56a3bc2612e408b803a9c9df6fd0d24'
 
-	domainfile = pkgutil.get_data('ppSpider', URL_RESOURCE_NAME)
-	domains = {domain.decode('utf-8').strip().split(",")[1]: domain.decode('utf-8').strip().split(",")[0] for domain in domainfile.splitlines()}
-	start_urls = ['{0}{1}'.format(HTTP_PREFIX, domain) for domain in domains.keys()]
+	def __init__(self):
+		self.domainfile = pkgutil.get_data('ppSpider', URL_RESOURCE_NAME)
+		self.domains = {}
+		for domain in self.domainfile.splitlines():
+			name = domain.decode('utf-8').strip().split(",")[1]
+			if name.count('.') > 1:
+				name = name[name.find('.')+1:]
+			rank = domain.decode('utf-8').strip().split(",")[0] 
+			if name not in self.domains:
+				self.domains[name] = rank
+		self.start_urls = ['{0}{1}'.format(HTTP_PREFIX, domain) for domain in self.domains.keys()]
+		super().__init__() 
+
 
 	def start_requests(self):
 		for url in self.start_urls:
@@ -77,9 +89,9 @@ class ppSpider(CrawlSpider):
 
 	def handleErrors(self, failure):
 		self.logger.error(repr(failure))
-
-		if failure.check(DNSLookupError):
-            # this is the original request
-            url = '{0}www.{1}'.format(HTTP_PREFIX, failure.request.url[len(HTTP_PREFIX):])
-            request = make_request(url, self.parse, self.handleErrors)
-            yield request
+		if failure.check(DNSLookupError) and 'www' not in failure.request.url:
+			# this is the original request
+			url = '{0}www.{1}'.format(HTTP_PREFIX, failure.request.url[len(HTTP_PREFIX):])
+			request = make_request(url, self.parse, self.handleErrors)
+			request.meta['domain'] =  failure.request.url[len(HTTP_PREFIX):]
+			yield request

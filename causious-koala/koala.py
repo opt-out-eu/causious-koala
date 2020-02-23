@@ -10,7 +10,7 @@ import logging
 
 import aiofiles
 import aiohttp
-from aiohttp import ClientSession
+from aiohttp import ClientSession, TCPConnector, ClientTimeout
 from bs4 import BeautifulSoup
 import textstat
 import gspread
@@ -19,11 +19,11 @@ from oauth2client.service_account import ServiceAccountCredentials
 
 logging.basicConfig(
     format="%(asctime)s %(levelname)s:%(name)s: %(message)s",
-    level=logging.DEBUG,
+    level=logging.INFO,
     datefmt="%H:%M:%S",
     stream=sys.stderr,
 )
-logger = logging.getLogger("score")
+logger = logging.getLogger("koala")
 logging.getLogger("chardet.charsetprober").disabled = True
 CONTACT_DB_SHEET_NAME = 'Contact Database'
 PP_SPREADSHEET_NAME = 'Privacy Score Data'
@@ -64,12 +64,12 @@ class ScorePP(object):
 		return textstat.smog_index(text)
 
 	def getDomainList(self):
-		print("Loading sheets...")
+		logger.info("Loading sheets...")
 		contacts_sheet = self.gc.open(CONTACT_DB_SHEET_NAME).sheet1
 		pp_sheet = self.gc.open(PP_SPREADSHEET_NAME).worksheet(PP_WORKSHEET_NAME)
 		contacts_list = contacts_sheet.get_all_records()
 		pp_list = pp_sheet.get_all_records()
-		print("Sheets loaded.")
+		logger.info("Sheets loaded.")
 
 		combined_list = {row['Domain']:[row['Privacy Policy']] for row in contacts_list if len(row['Privacy Policy'])>0}
 
@@ -85,32 +85,26 @@ class ScorePP(object):
 
 	def loadTopSitesLookup(self, topSitesFile):
 		results = {}
-		print("Loading top sites...")
+		logger.info("Loading top sites...")
 		with open(topSitesFile) as csvfile:
 			reader = csv.DictReader(csvfile)
 			for line in reader:
 				results[line['Domain']] = line['GlobalRank']
-		print("Top sites loaded.")
+		logger.info("Top sites loaded.")
 		return results
 
-	def saveOutput(self, outFile, results):
-		with open(outFile, 'w') as csvfile:
-			writer = csv.writer(csvfile)
-			writer.writerow(["domain", "majestic_rank", "redability_score", "urls"])
-			writer.writerows(results)
-
-	async def fetch_html(url, session, **kwargs):
-	    resp = await session.request(method="GET", url=url, **kwargs)
+	async def fetch_html(self, url, session, **kwargs):
+	    resp = await session.request(method="GET", url=url, allow_redirects=True, **kwargs)
 	    resp.raise_for_status()
 	    logger.info("Got response [%s] for URL: %s", resp.status, url)
 	    html = await resp.text()
 	    return html
 
-	async def parse(urls, session, **kwargs):
+	async def parse(self, urls, session, **kwargs):
 	    combined_text = ""
 	    for url in urls:
 		    try:
-		        html = await self.fetch_html(url=url, session=session, **kwargs)
+		        html = await self.fetch_html(url, session, **kwargs)
 		        combined_text = combined_text + self.getTextFromHTML(html)
 		    except (
 		        aiohttp.ClientError,
@@ -120,37 +114,42 @@ class ScorePP(object):
 		            "aiohttp exception for %s [%s]: %s",
 		            url,
 		            getattr(e, "status", None),
-		            getattr(e, "message", None),
+		            str(e),
 		        )
 		    except Exception as e:
 		    	logger.exception("Non-aiohttp exception occured:  %s", getattr(e, "__dict__", {}))
 		    return combined_text
 
-	async def score(urls, session, **kwargs):
+	async def score(self, urls, session, **kwargs):
 		text = await self.parse(urls, session, **kwargs)
-		return self.testTestReadability(combined_text)
+		return self.testTestReadability(text)		
 
-	async def write_one(file, domain, rank, urls, **kwargs):
-	    score = await score(url=url, **kwargs)
+	async def write_one(self, file, domain, rank, urls, session, **kwargs):
+	    score = await self.score(urls, session, **kwargs)
 	    async with aiofiles.open(file, "a") as f:
 	    	joined_urls = ";".join(urls)
 	    	await f.write(f"{domain},{rank},{score},{joined_urls}\n")
-	    	logger.info("Wrote results for domain: %s", domain)
+	    	logger.info("Wrote results for %s", domain)
 
-	async def bulk_crawl_and_write(file, site_rank, domain_list, **kwargs):
-		async with ClientSession() as session:
+	async def bulk_crawl_and_write(self, file, site_rank, domain_list, **kwargs):
+		async with ClientSession(
+				connector=TCPConnector(verify_ssl=False),
+				timeout=ClientTimeout(total=60)
+			) as session:
+			tasks = []
 			for domain, urls in domain_list.items():
-				tasks = []
 				if domain in site_rank and int(site_rank[domain]) < MAX_DOMAIN_RANK:
-					tasks.append(parse(file, domain, site_rank[domain], urls, session, **kwargs))
+					logger.info("Scheduling work for %s", domain)
+					tasks.append(asyncio.create_task(
+						self.write_one(file, domain, site_rank[domain], urls, session, **kwargs)))
 			await asyncio.gather(*tasks)
 
 	def run(self, topsitefile, outputfile):
 		site_rank = self.loadTopSitesLookup(topsitefile)
 		domain_list = self.getDomainList()
-		with open(outpath, "w") as outfile:
-			outfile.write("domain, majestic_rank, redability_score, urls\n")
-		asyncio.run(bulk_crawl_and_write(outputfile, site_rank, domain_list))
+		with open(outputfile, "w") as outfile:
+			outfile.write("domain,majestic_rank,redability_score,urls\n")
+		asyncio.run(self.bulk_crawl_and_write(outputfile, site_rank, domain_list))
 
 
 def getArgs():

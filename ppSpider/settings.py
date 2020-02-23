@@ -90,7 +90,7 @@ AUTOTHROTTLE_ENABLED = True
 #HTTPCACHE_DIR = 'httpcache'
 #HTTPCACHE_IGNORE_HTTP_CODES = []
 
-LOG_LEVEL = logging.INFO
+LOG_LEVEL = logging.ERROR
 LOG_FILE = 'scrapy.log'
 
 #Export as CSV Feed
