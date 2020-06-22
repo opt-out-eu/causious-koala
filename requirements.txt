@@ -6,3 +6,7 @@ textstat
 click
 aiofiles
 aiohttp
+html5lib
+pandas
+google-api-python-client
+tldextract
